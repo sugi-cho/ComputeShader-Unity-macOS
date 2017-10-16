@@ -1,0 +1,86 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel init
+#pragma kernel emit
+#pragma kernel update
+
+#include "UnityCG.cginc"
+#include "ParticleCommon.cginc"
+#include "Assets/CGINC/SimplexNoise3D.cginc"
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture=
+Texture2D<float4> _PosTex;
+Texture2D<float4> _NormTex;
+Texture2D<float4> _ColTex;
+
+float _LifeTime;
+float _StartVel;
+float _Size;
+float _DT;
+float _Damp;
+
+int _TexSize;
+int _PoolCount;
+
+RWStructuredBuffer<ParticleData> _Particles;
+ConsumeStructuredBuffer<uint> _Pool;
+AppendStructuredBuffer<uint> _Active;
+AppendStructuredBuffer<uint> _Dead;
+
+[numthreads(16,1,1)]
+void init (uint3 id : SV_DispatchThreadID){
+	uint idx = id.x;
+	_Particles[idx].isActive = false;
+	_Dead.Append(idx);
+}
+
+[numthreads(8,8,1)]
+void emit (uint3 id : SV_DispatchThreadID)
+{
+    int count = id.x * _TexSize + id.y;
+	float4 pos = _PosTex[id.xy];
+	if(0 < pos.a && count < _PoolCount){
+		float3 norm = _NormTex[id.xy].xyz;
+		float4 color = _ColTex[id.xy];
+		uint idx = _Pool.Consume();
+		ParticleData p = _Particles[idx];
+
+		p.isActive = true;
+		p.position = pos.xyz;
+		p.velocity = normalize(norm) * _StartVel;
+		p.color = half4(color.rgb * (norm.y*0.5+0.5),1);
+		p.size = _Size;
+		p.duration = _LifeTime;
+		_Particles[idx] = p;
+	}
+}
+
+
+float3 divergenceFreeNoise(float3 pos){
+	float3 grad0 = snoise_grad(pos);
+	float3 grad1 = snoise_grad(pos + 5.33);
+	return cross(grad0, grad1);
+}
+
+[numthreads(16,1,1)]
+void update (uint3 id : SV_DispatchThreadID){
+	uint idx = id.x;
+	ParticleData p = _Particles[idx];
+	if(p.isActive){
+		float t = 1.0 - p.duration / _LifeTime;
+		float r = frac(idx * 0.001);
+		p.velocity += divergenceFreeNoise(p.position * 1.5) * _DT * saturate(2.0*t-(1-r*r)*1.5) * 2.0;
+		p.velocity.yz += 5.0 * _DT * saturate(2.0*t-(1-r*r)*1.5);
+		float speed = length(p.velocity);
+		p.velocity -= (p.velocity * speed *_Damp) * _DT;
+
+		p.position += p.velocity * _DT;
+		p.duration -= _DT;
+		if(p.duration < 0){
+			p.isActive = false;
+			_Dead.Append(idx);
+		}
+		else
+			_Active.Append(idx);
+		_Particles[idx] = p;
+	}
+}
